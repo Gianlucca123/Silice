@@ -53,10 +53,10 @@ void main()
 
     // read buttons and update selection
     if (*BUTTONS & (1<<3)) {
-      ++ selected;
+      -- selected;
     }
     if (*BUTTONS & (1<<4)) {
-      -- selected;
+      ++ selected;
     }
     // wrap around
     if (selected < 0) {
