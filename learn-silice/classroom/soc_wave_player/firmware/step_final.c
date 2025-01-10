@@ -21,6 +21,70 @@ char path[MAX_FILENAME_SIZE];
 int is_music[MAX_FILENAMES];
 
 
+void jingle() {
+  FL_FILE *f = fl_fopen("/Img/ph.raw","rb");
+  if (f == NULL) {
+    // error, no file
+    printf("file not found.\n");
+    display_refresh();
+  } else {
+    display_set_front_back_color(0,255);
+    printf("music file found.\n");
+    display_refresh();
+    display_set_front_back_color(255,0);
+    printf("playing ... ");
+    display_refresh();
+
+    image("/Img/w.data");
+    int leds = 1;
+    int dir  = 0;
+    // plays the entire file
+    while (1) {
+      // read directly in hardware buffer
+      int *addr = (int*)(*AUDIO);
+      // (use 512 bytes reads to avoid extra copies inside fat_io_lib)
+      int sz = fl_fread(addr,1,512,f);
+      if (sz < 512) break; // reached end of file
+      // wait for buffer swap
+      while (addr == (int*)(*AUDIO)) { }
+      // light show!
+      if (leds == 128 || leds == 1) { dir = 1-dir; }
+      if (dir) {
+        leds = leds << 1;
+      } else {
+        leds = leds >> 1;
+      }
+      *LEDS = leds;
+    }
+    // close
+    fl_fclose(f);
+  }
+}
+
+
+void image(const char *file_name) {
+    memset(display_framebuffer(), 0x00, 128 * 128);
+    const char *path_m = "/Img/w.data";
+    FL_FILE *g = fl_fopen(path_m,"rb");
+    if (g == NULL) {
+        printf("img.raw not found.\n");
+        printf("file img: %s\n", path_m);
+        display_refresh();
+    } else {
+        //printf("image found.\n");
+        //printf("file: %s\n", path_m);
+        display_refresh();
+        // read pixels in framebuffer
+        fl_fread(display_framebuffer(),1,128*128,g);
+        // refresh display to show the image
+        display_refresh();
+        // close
+        fl_fclose(g);
+    }
+
+}
+
+
 void clear_audio()
 {
   // wait for a buffer swap (sync)
@@ -65,6 +129,8 @@ void openMusic(const char *path_file, const char *file_name) {
 
   printf("file: %s\n", path);
   display_refresh();
+
+  image(file_name);
 
   // Open the selected music file
   FL_FILE *f = fl_fopen(path, "rb");
@@ -168,6 +234,11 @@ void main()
   while (fl_attach_media(sdcard_readsector, sdcard_writesector) != FAT_INIT_OK) {
     // keep trying, we need this
   }
+  memset(display_framebuffer(),0x00,128*128);
+  display_refresh();
+  display_set_cursor(0,0);
+  display_set_front_back_color(0,255);
+  jingle();
 
   while(1) {
     // header
@@ -178,6 +249,7 @@ void main()
     //printf("    ===== Musics =====    \n\n");
     display_refresh();
     display_set_front_back_color(255,0);
+    
     // list files (see fl_listdirectory if at_io_lib/src/fat_filelib.c)
     FL_DIR dirstat;
     // FL_LOCK(&_fs);
@@ -228,6 +300,7 @@ void main()
         if (*BUTTONS & (1<<6)) {
             if(is_music[selected]) {
                 openMusic(path, item[selected]);
+                memset(display_framebuffer(), 0x00, 128 * 128);
             }
             else {
                 memcpy(path_history, path, MAX_FILENAME_SIZE);
