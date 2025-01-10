@@ -21,6 +21,57 @@ char path[MAX_FILENAME_SIZE];
 int is_music[MAX_FILENAMES];
 
 
+void button_song() {
+  FL_FILE *f = fl_fopen("/Img/bib.raw","rb");
+  if (f == NULL) {
+    // error, no file
+    printf("file not found.\n");
+    display_refresh();
+  } else {
+    int leds = 1;
+    int dir  = 0;
+    // plays the entire file
+    while (1) {
+      // read directly in hardware buffer
+      int *addr = (int*)(*AUDIO);
+      // (use 512 bytes reads to avoid extra copies inside fat_io_lib)
+      int sz = fl_fread(addr,1,512,f);
+      if (sz < 512) break; // reached end of file
+      // wait for buffer swap
+      while (addr == (int*)(*AUDIO)) { }
+    }
+    // close
+    fl_fclose(f);
+  }
+}
+
+void selectImage(const char *path_file){
+
+    if( strncmp(path_file, "/Rock", 4) == 0){
+        display_refresh();
+        image("ro.data");
+
+    }   
+    if( strncmp(path_file, "/Classic", 7) == 0){
+        display_refresh();
+        image("cc.data");
+      
+    }  
+    if( strncmp(path_file, "/Pop", 3) == 0){
+        display_refresh();
+        image("p.data");
+    }   
+    if( strncmp(path_file, "/Electronic", 10) == 0){
+        display_refresh();
+        image("e.data");
+    }
+    if( strncmp(path_file, "/Welcome", 7) == 0){
+        display_refresh();
+        image("w.data");
+    }
+}
+
+
 void jingle() {
   FL_FILE *f = fl_fopen("/Img/ph.raw","rb");
   if (f == NULL) {
@@ -35,7 +86,7 @@ void jingle() {
     printf("playing ... ");
     display_refresh();
 
-    image("/Img/w.data");
+    selectImage("/Welcome");
     int leds = 1;
     int dir  = 0;
     // plays the entire file
@@ -63,8 +114,17 @@ void jingle() {
 
 
 void image(const char *file_name) {
-    memset(display_framebuffer(), 0x00, 128 * 128);
-    const char *path_m = "/Img/w.data";
+    char path_m[MAX_FILENAME_SIZE];
+    path_m[0] = '\0';
+    strcat(path_m, "/Img/");
+    const char *end = strcat(path_m, file_name);  // Append the file name
+    /* if (end - path > 64) {
+        *LEDS = 15;
+        printf("ERROR path too large\n");
+        printf("file: %s\n", path_m);
+        display_refresh();
+        while (1) {}
+    } */
     FL_FILE *g = fl_fopen(path_m,"rb");
     if (g == NULL) {
         printf("img.raw not found.\n");
@@ -130,7 +190,7 @@ void openMusic(const char *path_file, const char *file_name) {
   printf("file: %s\n", path);
   display_refresh();
 
-  image(file_name);
+  selectImage(path_file);
 
   // Open the selected music file
   FL_FILE *f = fl_fopen(path, "rb");
@@ -287,9 +347,11 @@ void main()
 
         // read buttons and update selection
         if (*BUTTONS & (1<<3)) {
+            button_song();
             -- selected;
         }
         if (*BUTTONS & (1<<4)) {
+            button_song();
             ++ selected;
         }
         if (*BUTTONS & (1<<5)) {
