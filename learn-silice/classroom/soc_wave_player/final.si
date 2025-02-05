@@ -1,0 +1,266 @@
+// SL 2022-01-10 @sylefeb
+// https://github.com/sylefeb/Silice
+// MIT license, see LICENSE_MIT in Silice repo root
+
+// Pre-compilation script, embeds compiled code within a string
+// Code has to be compiled into firmware/code.hex before
+$$dofile('pre_include_compiled.lua')
+
+// Setup memory size
+// - addrW is the address bus width
+// - the topmost bit is used to indicate peripheral access
+// - we thus allocate 2^(addrW-1) uint32 of RAM
+$$addrW      = 15
+$$periph_bit = addrW-1
+// Configure BRAM (needed for write mask)
+$$config['bram_wmask_byte_wenable_width'] = 'data'
+// Includes the processor
+$include('../../../projects/ice-v/CPUs/ice-v.si')
+// Includes the SPIscreen driver
+$include('../../../projects/ice-v/SOCs/ice-v-oled.si')
+
+// Memory interface between SOC and CPU
+group mem_io
+{
+  uint4       wenable(0), // write enable mask (xxxx, 0:nop, 1:write)
+  uint32      wdata(0),   // data to write
+  uint32      rdata(0),   // data read from memory
+  uint$addrW$ addr(0),    // address, init is boot address
+}
+
+// --------------------------------------------------
+// Audio output unit
+// --------------------------------------------------
+
+unit audio(input  uint8 audio_in,output uint4 audio_out)
+{
+  uint8 counter = 0;
+  uint4 low     = 0;
+  uint4 high    = 15;
+  always {
+    uint8 frac  = audio_in;
+    audio_out   = counter < frac ? high : low;
+    counter     = counter + 1;
+  }
+}
+
+// --------------------------------------------------
+// SOC unit (main)
+// --------------------------------------------------
+//   some input/outputs do not exist in simulation and
+//   are therefore enclosed in pre-processor conditions
+unit main(
+  output uint8 leds,
+$$if BUTTONS then
+  input  uint7 btns,
+$$end
+$$if AUDIO then
+  output uint4 audio_l,
+  output uint4 audio_r,
+$$end
+  output uint1 oled_clk,
+  output uint1 oled_mosi,
+  output uint1 oled_dc,
+  output uint1 oled_resn,
+  output uint1 oled_csn(0),
+$$if VERILATOR then
+  // configuration for SPIscreen simulation
+  output uint2  spiscreen_driver(1/*SSD1351*/),
+  output uint10 spiscreen_width(128),
+  output uint10 spiscreen_height(128),
+$$end
+$$if SDCARD then
+  output  uint1  sd_clk,
+  output  uint1  sd_csn,
+  output  uint1  sd_mosi,
+  input   uint1  sd_miso,
+$$end
+) {
+
+$$if SIMULATION then
+   // count cycles in simulation for debugging purposes
+   uint32 cycle(0);
+$$end
+
+  // SPIscreen (OLED) controller chip
+  oled display(
+    oled_din        :> oled_mosi,
+    oled_clk        :> oled_clk,
+    oled_dc         :> oled_dc,
+  );
+  // allocate a BRAM for the display pixels
+  simple_dualport_bram uint8 frame_buffer[$128*128$] = uninitialized;
+  uint1  fb_enabled  = 0;
+  uint14 fb_pixcount = 0;
+  uint3  fb_channel  = 3b010;
+  uint17 fb_wait     = 1;
+
+$$if not SDCARD then
+  // for simulation ('fake' inputs/outputs)
+  uint1  sd_clk(0);
+  uint1  sd_csn(0);
+  uint1  sd_mosi(0);
+  uint1  sd_miso(0);
+$$end
+
+$$if not BUTTONS then
+  // for simulation ('fake' inputs/outputs)
+  uint7 btns(0);
+$$end
+
+$$if not AUDIO then
+  // for simulation ('fake' inputs/outputs)
+  uint4 audio_l(0);
+  uint4 audio_r(0);
+$$end
+
+  // audio output
+  audio audio;
+  // audio streaming
+  $$PERIOD = 3124
+  // we allocated 2x 512 8bit samples
+  simple_dualport_bram uint8 audio_buffer[1024] = {pad(0)};
+  uint1  audio_buffer_select(0); // buffer to which we write
+  uint10 audio_buffer_sample(0); // sample being played
+  uint12 audio_counter(0);
+  uint10 audio_buffer_start_waddr <:: audio_buffer_select ? 512 : 0;
+  uint10 audio_buffer_start_raddr <:: audio_buffer_select ?   0 : 512;
+  uint32 audio_addr_cpu           <:: 32h18000 | {22b0,audio_buffer_start_waddr};
+
+  // RAM
+  // Instantiate the memory interface
+  mem_io memio;
+  // Instantiate a BRAM holding the system's RAM, 32bits words
+  // -> uses template "bram_wmask_byte", that turns wenable into a byte mask
+  bram uint32 ram<"bram_wmask_byte">[$1<<(addrW-1)$] = $meminit$;
+
+  // Instantiate our CPU
+  rv32i_cpu cpu( mem <:> memio );
+
+	// Variables to record previous cycle CPU access (peripherals memory mapping)
+  // The CPU issues a memory request a cycle i and expects the result at i+1
+	uint$addrW$ prev_mem_addr(0);
+	uint4       prev_mem_rw(0);
+  uint32      prev_wdata(0);
+
+  // --- SOC logic, the always block is always active
+  always {
+    display.enable     = 0;       // maintain display enable low (pulses on use)
+    // ---- hardware audio streaming
+    audio_l             = audio.audio_out; // feed output to on-board DAC
+    audio_r             = audio.audio_out;
+    audio.audio_in      = audio_buffer.rdata0; // feed sample to audio out
+    audio_buffer_select = audio_buffer_sample[9,1]    // if == 512, done reading
+        ? ~audio_buffer_select : audio_buffer_select; // swap buffers
+    audio_buffer.addr0  = audio_buffer_start_raddr         // start addr
+                        | {1b0,audio_buffer_sample[0,9]};  // current sample
+    audio_buffer.wenable1 = 0; // maintain write port low (pulses on CPU write)
+    audio_buffer_sample   =
+          audio_buffer_sample[9,1] ? 0 : ( // reset counter if done
+              audio_counter != $PERIOD$
+            ? audio_buffer_sample     // stay on sample if delay not elapsed
+            : (audio_buffer_sample+1) // go to next sample
+          );
+    audio_counter       = (audio_counter == $PERIOD$) ? 0 : (audio_counter+1);
+    // ---- hardware display buffer
+    frame_buffer.wenable1   = 0;
+    display.enable          = fb_enabled & fb_wait[0,1];
+    display.data_or_command = 1;
+    display.byte            = frame_buffer.rdata0;
+    frame_buffer.addr0      = fb_pixcount;
+    fb_channel              = (fb_enabled & fb_wait[0,1])
+                                           ? {fb_channel[0,2],fb_channel[2,1]}
+                                           : fb_channel;
+    fb_wait                 = (fb_enabled) ? {fb_wait[0,16],fb_wait[16,1]}
+                                           : fb_wait;
+    fb_pixcount             = (fb_enabled & fb_wait[0,1] & fb_channel[0,1])
+                                           ? fb_pixcount + 1
+                                           : fb_pixcount;
+    // ---- check whether the CPU read from or wrote to a peripheral address
+    uint1 peripheral   =  prev_mem_addr[$periph_bit$,1];
+    uint1 peripheral_r =  peripheral & (prev_mem_rw == 4b0); // reading periph.
+    uint1 peripheral_w =  peripheral & (prev_mem_rw != 4b0); // writing periph.
+    uint1 audio_access =  prev_mem_addr[$periph_bit-1$,1];
+    uint1 leds_access            = prev_mem_addr[ 0,1];
+    uint1 display_direct_access  = prev_mem_addr[ 1,1];
+    uint1 display_reset_access   = prev_mem_addr[ 2,1];
+    uint1 sd_access              = prev_mem_addr[ 5,1];
+    uint1 button_access          = prev_mem_addr[ 6,1];
+    uint1 framebuffer_access     = prev_mem_addr[$periph_bit-2$,1];
+	  // ---- memory access CPU <-> BRAM (reads and writes)
+    // reads  RAM, peripherals => CPU
+    memio.rdata   = // read data is either from memory or SOC peripherals
+       // CPU reading from RAM
+       (~peripheral_r                  ? ram.rdata          : 32b0)
+       // CPU reading from peripherals
+     | ((peripheral_r & sd_access)     ? {31b0,    sd_miso} : 32b0)
+     | ((peripheral_r & button_access) ? {25b0,       btns} : 32b0)
+     | ((peripheral_r & audio_access)  ? audio_addr_cpu     : 32b0)
+    ;
+    // writes CPU => RAM
+    ram.wenable = memio.wenable & {4{~memio.addr[$periph_bit$,1]}};
+		//                            ^^^^^^^ no write if on peripheral addresses
+    ram.wdata        = memio.wdata;
+    ram.addr         = memio.addr;
+    // writes CPU => peripherals
+    if (peripheral_w & ~audio_access & ~framebuffer_access) {
+      /// LEDs
+      leds           = leds_access ? prev_wdata[0,8] : leds;
+      /// display
+      if (display_direct_access) {
+        // -> whether to send command or data
+        display.enable          = (prev_wdata[9,1] | prev_wdata[10,1]);
+        // -> byte to send
+        display.byte            = prev_wdata[0,8];
+        // -> data or command
+        display.data_or_command = prev_wdata[10,1];
+      }
+      // -> SPIscreen reset
+      oled_resn      = ~ (display_reset_access & prev_wdata[0,1]);
+      /// sdcard output pins
+      sd_clk  = sd_access ? prev_wdata[0,1] : sd_clk;
+      sd_mosi = sd_access ? prev_wdata[1,1] : sd_mosi;
+      sd_csn  = sd_access ? prev_wdata[2,1] : sd_csn;
+      /// audio
+$$if SIMULATION then
+      // Add some simulation debug output here, convenient during development!
+      if (leds_access) {
+        __display("[cycle %d] LEDs: %b (%d)",cycle,leds,prev_wdata);
+        if (leds == 255) { __finish(); }// special LED value stops simulation
+                                        // convenient to interrupt from firmware
+      }
+$$end
+    }
+
+    if (peripheral_w) {
+      uint2 which = prev_mem_rw[1,2] | {2{prev_mem_rw[3,1]}};
+      //    ^^^^^ produces 0,1,2,3 based on write mask
+      // ---- audio
+      audio_buffer.wdata1   = prev_wdata >> {which,3b0};
+      //       ^^^ sample to be written ^^ (shift due to 32bits addressing)
+      audio_buffer.addr1    = audio_buffer_start_waddr
+                            | {prev_mem_addr[0,7],2b0}//addr from CPU (32bits)
+                            | which; // sample address
+      audio_buffer.wenable1 = audio_access; // write sample
+      // ---- display
+      frame_buffer.wenable1 = framebuffer_access;
+      fb_enabled            = fb_enabled | framebuffer_access;
+      frame_buffer.addr1    = {prev_mem_addr[0,12],which}; //addr from CPU (32bits)
+      uint8 clr = prev_wdata[{which,3b000},8]; // get 8 bit channel value
+      frame_buffer.wdata1   = {2b00,clr[2,6]}; // remap to 6 bits per channel
+    }
+
+    // record current access for next cycle memory mapping checks
+		prev_mem_addr = memio.addr;
+		prev_mem_rw   = memio.wenable;
+    prev_wdata    = memio.wdata;
+
+$$if SIMULATION then
+    cycle = cycle + 1;
+$$end
+
+  } // end of always block
+
+}
+
+// --------------------------------------------------

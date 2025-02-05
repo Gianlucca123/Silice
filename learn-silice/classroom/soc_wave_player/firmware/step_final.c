@@ -21,7 +21,7 @@ char path[MAX_FILENAME_SIZE];
 int is_music[MAX_FILENAMES];
 
 
-void button_song() {
+/* void button_song() {
   FL_FILE *f = fl_fopen("/Img/bib.raw","rb");
   if (f == NULL) {
     // error, no file
@@ -43,37 +43,42 @@ void button_song() {
     // close
     fl_fclose(f);
   }
-}
+} */
 
 void selectImage(const char *path_file){
 
     if( strncmp(path_file, "/Rock", 4) == 0){
         display_refresh();
-        image("ro.data");
+        image("r.data");
 
     }   
     if( strncmp(path_file, "/Classic", 7) == 0){
         display_refresh();
-        image("cc.data");
+        image("c.data");
       
     }  
     if( strncmp(path_file, "/Pop", 3) == 0){
         display_refresh();
-        image("p.data");
+        image("pop.data");
     }   
-    if( strncmp(path_file, "/Electronic", 10) == 0){
+    if( strncmp(path_file, "/Rap", 3) == 0){
         display_refresh();
-        image("e.data");
+        image("rap.data");
     }
     if( strncmp(path_file, "/Welcome", 7) == 0){
         display_refresh();
         image("w.data");
     }
+    if( strncmp(path_file, "/Never", 5) == 0){
+        display_refresh();
+        image("ngd.data");
+    }
+    
 }
 
 
 void jingle() {
-  FL_FILE *f = fl_fopen("/Img/ph.raw","rb");
+  FL_FILE *f = fl_fopen("/Img/gta.raw","rb");
   if (f == NULL) {
     // error, no file
     printf("file not found.\n");
@@ -87,6 +92,46 @@ void jingle() {
     display_refresh();
 
     selectImage("/Welcome");
+    int leds = 1;
+    int dir  = 0;
+    // plays the entire file
+    while (1) {
+      // read directly in hardware buffer
+      int *addr = (int*)(*AUDIO);
+      // (use 512 bytes reads to avoid extra copies inside fat_io_lib)
+      int sz = fl_fread(addr,1,512,f);
+      if (sz < 512) break; // reached end of file
+      // wait for buffer swap
+      while (addr == (int*)(*AUDIO)) { }
+      // light show!
+      if (leds == 128 || leds == 1) { dir = 1-dir; }
+      if (dir) {
+        leds = leds << 1;
+      } else {
+        leds = leds >> 1;
+      }
+      *LEDS = leds;
+    }
+    // close
+    fl_fclose(f);
+  }
+}
+
+void never_gonna_give_you_up() {
+  FL_FILE *f = fl_fopen("/Img/ngd.raw","rb");
+  if (f == NULL) {
+    // error, no file
+    printf("file not found.\n");
+    display_refresh();
+  } else {
+    display_set_front_back_color(0,255);
+    printf("music file found.\n");
+    display_refresh();
+    display_set_front_back_color(255,0);
+    printf("playing ... ");
+    display_refresh();
+
+    selectImage("/Never");
     int leds = 1;
     int dir  = 0;
     // plays the entire file
@@ -202,10 +247,10 @@ void openMusic(const char *path_file, const char *file_name) {
     return;
   } else {
     display_set_front_back_color(0, 255);
-    printf("file: %s\n", path);
+    //printf("file: %s\n", path);
     display_refresh();
     display_set_front_back_color(255, 0);
-    printf("playing ... ");
+    //printf("playing ... ");
     display_refresh();
     *LEDS = 16;
 
@@ -282,6 +327,7 @@ void main()
   oled_init();
   oled_fullscreen();
   oled_clear(0);
+  int counter = 0;
   int selected = 0;
   int pulse = 0;
   int n_items = 0;
@@ -347,15 +393,15 @@ void main()
 
         // read buttons and update selection
         if (*BUTTONS & (1<<3)) {
-            button_song();
             -- selected;
         }
         if (*BUTTONS & (1<<4)) {
-            button_song();
             ++ selected;
+            counter ++;
         }
         if (*BUTTONS & (1<<5)) {
             strcpy(path, path_history);
+            counter = 0;
             n_items = 0;
             break;
         }
@@ -377,6 +423,12 @@ void main()
         }
         if (selected >= n_items) {
             selected = 0;
+        }
+        if(counter > 500) {
+          never_gonna_give_you_up();
+          clear_audio();
+          counter = 0;
+          memset(display_framebuffer(),0x00,128*128);
         }
 
     }
